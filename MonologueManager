@@ -1,0 +1,231 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using PixelCrushers.DialogueSystem;
+using TMPro;
+using Michsky.MUIP;
+using UnityEngine.UI;
+
+public class MonologueManager : MonoBehaviour
+{
+    public static MonologueManager instance;
+    public GameObject textPrefab;
+    public GameObject combiPrefab;
+
+    public List<string> keywords = new List<string>();
+    public List<string> combi_keywords = new List<string>();
+
+    public Transform keywordsParent;
+    public Transform combiPrefabTransform;
+    private TMP_Text currentText;
+    public float spawnRadius = 100.0f;
+    public Animator UIAnim;
+    public GameObject MonologueUI;
+    public ButtonManager[] MonologueBtns;
+    public ButtonManager BackBtn;
+    public GameObject[] MonologueUI_List;
+
+    public ButtonManager CombiBtn;
+    public GameObject CombiActionPanel;
+
+    private const float storyOpenDelay = 1f; // 스토리 오픈 딜레이 상수로 관리
+
+    void Awake()
+    {
+        SetupSingleton();
+        UIAnim = MonologueUI.GetComponent<Animator>();
+    }
+
+    void Start()
+    {
+        SetupButtonListeners();
+    }
+
+    // 싱글톤 패턴 최적화
+    private void SetupSingleton()
+    {
+        if (instance == null)
+        {
+            instance = this;
+            DontDestroyOnLoad(gameObject);
+        }
+        else
+        {
+            Destroy(gameObject);
+        }
+    }
+
+    // 버튼 클릭 리스너 설정
+    private void SetupButtonListeners()
+    {
+        MonologueBtns[0].onClick.AddListener(OpenKeywords);
+        MonologueBtns[1].onClick.AddListener(OpenCombination);
+        MonologueBtns[2].onClick.AddListener(OpenStory);
+        MonologueBtns[3].onClick.AddListener(() => UIManager.instance.UIListClose(0));
+        CombiBtn.onClick.AddListener(CombinationStart);
+    }
+
+    // 키워드 획득
+    public void GetKeywords()
+    {
+        AddKeyword("키워드", UIManager.instance.NotifiTransform);
+    }
+
+    public void GetKeywordsInDebate()
+    {
+        AddKeyword("키워드", UIManager.instance.NotifiDabateTransform);
+    }
+
+    // 공통 키워드 추가 및 알림 표시
+    private void AddKeyword(string keywordVariable, Transform parentTransform)
+    {
+        string keyword = DialogueLua.GetVariable(keywordVariable).asString;
+        keywords.Add(keyword);
+
+        GameObject notifi = Instantiate(UIManager.instance.NotifiObject, parentTransform);
+        var notification = notifi.GetComponent<NotificationManager>();
+        notification.title = "키워드";
+        notification.description = $"'{keyword}'에 대한 키워드를 얻었습니다.\n독백에서 확인하세요.";
+        notification.OpenNotification();
+    }
+
+    // 백 버튼 열기 및 닫기
+    private void OpenBackBtn()
+    {
+        UIAnim.SetTrigger("BackOpen");
+    }
+
+    private void CloseBackBtn()
+    {
+        UIAnim.SetTrigger("BackClose");
+    }
+
+    // 키워드 열기
+    public void OpenKeywords()
+    {
+        TriggerUI("BtnClose", "KeyOpen");
+        OpenBackBtn();
+        BackBtn.onClick.AddListener(CloseKeywords);
+        MonologueUI_List[0].SetActive(true);
+        SpawnKeywords();
+    }
+
+    // 키워드 생성 로직
+    private void SpawnKeywords()
+    {
+        foreach (var keyword in keywords)
+        {
+            Vector2 randomPosition = (Vector2)keywordsParent.position + Random.insideUnitCircle * spawnRadius;
+            GameObject textObject = Instantiate(textPrefab, keywordsParent);
+            textObject.transform.position = randomPosition;
+            currentText = textObject.GetComponent<TMP_Text>();
+            currentText.text = keyword;
+        }
+    }
+
+    public void CloseKeywords()
+    {
+        CloseUISection(0, "Close", CloseKeywords);
+    }
+
+    // 조합 시작
+    public void CombinationStart()
+    {
+        combi_keywords.Clear();
+
+        foreach (var keyword in MonologueUI_List[1].transform.GetChild(1).GetComponentsInChildren<CombinationUI_KeywordDropItem>())
+        {
+            combi_keywords.Add(keyword.item.GetComponentInChildren<TMP_Text>().text);
+        }
+
+        CloseBackBtn();
+        MonologueUI_List[1].SetActive(false);
+        CombiActionPanel.SetActive(true);
+        CameraManager.instance.CombiCameraTimeline();
+    }
+
+    // 조합 열기
+    public void OpenCombination()
+    {
+        if (keywords.Count == 0) return;
+
+        TriggerUI("BtnClose", "CombiOpen");
+        OpenBackBtn();
+        BackBtn.onClick.AddListener(CloseCombination);
+        MonologueUI_List[1].SetActive(true);
+        SpawnCombinations();
+    }
+
+    // 조합 키워드 생성
+    private void SpawnCombinations()
+    {
+        foreach (var keyword in keywords)
+        {
+            GameObject textObject = Instantiate(combiPrefab, combiPrefabTransform);
+            currentText = textObject.GetComponentInChildren<TMP_Text>();
+            currentText.text = keyword;
+        }
+    }
+
+    public void CloseCombination()
+    {
+        CloseUISection(1, "Close", CloseCombination);
+    }
+
+    // 스토리 열기
+    public void OpenStory()
+    {
+        StartCoroutine(OpenStoryAnim());
+    }
+
+    public IEnumerator OpenStoryAnim()
+    {
+        TriggerUI("BtnClose", "StoryOpen");
+        yield return new WaitForSeconds(storyOpenDelay); // 상수화된 딜레이 사용
+
+        UIAnim.SetTrigger("StoryOpen");
+        OpenBackBtn();
+        BackBtn.onClick.AddListener(CloseStory);
+        MonologueUI_List[2].SetActive(true);
+    }
+
+    public void CloseStory()
+    {
+        StartCoroutine(CloseStoryAnim());
+    }
+
+    public IEnumerator CloseStoryAnim()
+    {
+        CloseBackBtn();
+        UIAnim.SetTrigger("StoryClose");
+
+        yield return new WaitForSeconds(0.1f);
+        CameraManager.instance.anim.SetTrigger("Close");
+        BackBtn.onClick.RemoveAllListeners();
+        MonologueUI_List[2].SetActive(false);
+        UIAnim.SetTrigger("BtnOpen");
+    }
+
+    // 공통 UI 트리거 메서드
+    private void TriggerUI(string btnTrigger, string camTrigger)
+    {
+        UIAnim.SetTrigger(btnTrigger);
+        CameraManager.instance.anim.SetTrigger(camTrigger);
+    }
+
+    // 공통 UI 섹션 닫기 로직
+    private void CloseUISection(int uiIndex, string cameraTrigger, UnityEngine.Events.UnityAction closeAction)
+    {
+        CloseBackBtn();
+        CameraManager.instance.anim.SetTrigger(cameraTrigger);
+
+        foreach (Transform child in MonologueUI_List[uiIndex].transform.GetChild(0))
+        {
+            Destroy(child.gameObject);
+        }
+
+        BackBtn.onClick.RemoveListener(closeAction);
+        MonologueUI_List[uiIndex].SetActive(false);
+        UIAnim.SetTrigger("BtnOpen");
+    }
+}
