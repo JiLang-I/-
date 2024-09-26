@@ -1,0 +1,293 @@
+using UnityEngine;
+using UnityEngine.UI;
+using System;
+using TMPro;
+using System.Collections;
+using System.Collections.Generic;
+
+namespace InGameScene
+{
+    [RequireComponent(typeof(Rigidbody2D))]
+    public class Player : MonoBehaviour
+    {
+        // 애니메이션 해시 키
+        private static readonly int WALK_RIGHT_KEY = Animator.StringToHash("Walk_Right");
+        private static readonly int WALK_LEFT_KEY = Animator.StringToHash("Walk_Left");
+        private static readonly int HIT_KEY = Animator.StringToHash("Hit");
+        private static readonly int DEATH_KEY = Animator.StringToHash("Death");
+        private static readonly int REVIVE_KEY = Animator.StringToHash("Revive");
+
+        // SerializeField로 인스펙터에서 설정할 수 있는 변수
+        [SerializeField] private Animator m_Animator;
+        [SerializeField] private float speed = 1f;
+        [SerializeField] private float detectionRadius = 1f;
+        [SerializeField] private float knockBackForce = 3f;
+        [SerializeField] private GameObject _damagePrefab;
+        [SerializeField] private Joystick _joyStickObj;
+        [SerializeField] private GameObject _particlesParentObject;
+        [SerializeField] private GameObject[] _particle;
+
+        // 외부에서 접근할 수 있는 변수
+        public Scanner scanner;
+        public Rigidbody2D rgbd2d;
+        public float maxHP = 100;
+        public Slider hpBar;
+        public AnimalObject[] _animalArray;
+        public LayerMask enemyLayer;
+        public bool AutoMode;
+
+        // private 변수
+        private WeaponObject[] _weaponArray;
+        private bool _isHitting;
+        private float _hitTimer;
+        private float _hitDelay = 0.7f;
+        private bool isInRange = false;
+        private string[] dmgUnitArr = { "", "만", "억", "조", "경", "해", "자", "양", "가", "구", "간" };
+
+        // 체력 업데이트를 위한 이벤트
+        private float currentHp;
+        public event Action<float> OnHealthChanged;
+
+        private void Awake()
+        {
+            rgbd2d = GetComponent<Rigidbody2D>();
+            scanner = GetComponent<Scanner>();
+            AutoMode = false;
+            currentHp = maxHP; // 초기 체력 설정
+        }
+
+        private void Start()
+        {
+            // 체력 변경 이벤트에 UI 업데이트 함수 구독
+            OnHealthChanged += UpdateHealthBar;
+            StartCoroutine(RecoverHealth());  // 체력 회복 코루틴 시작
+        }
+
+        private void FixedUpdate()
+        {
+            // 플레이어가 사망하면 더 이상 업데이트를 하지 않음
+            if (currentHp <= 0) return;
+
+            if (!AutoMode)
+                HandleManualModeMovement();  // 수동 모드일 때의 움직임 처리
+            else
+                HandleAutoModeMovement();    // 자동 모드일 때의 움직임 처리
+
+            HandleHitting();  // 공격 처리
+        }
+
+        // 수동 모드에서 플레이어 이동 처리
+        private void HandleManualModeMovement()
+        {
+            Vector2 moveVector = GetMovementVector();
+            HandleAnimation(moveVector);  // 이동 방향에 따른 애니메이션 처리
+
+            if (!_isHitting) MovePlayer(moveVector);  // 공격 중이 아니면 이동
+            AssignAnimalTarget();  // 동물 타겟 설정
+        }
+
+        // 자동 모드에서 플레이어 이동 처리
+        private void HandleAutoModeMovement()
+        {
+            Vector2 moveVector = GetMovementVector();
+            HandleAnimation(moveVector);
+
+            if (!_isHitting) MovePlayer(moveVector);
+
+            AssignAnimalTarget();
+
+            if (_joyStickObj.transform.GetChild(0).gameObject.activeSelf == false)
+            {
+                AutoFollowTarget();  // 타겟 자동 추적
+            }
+        }
+
+        // 이동 벡터 계산 (조이스틱 방향에 따라)
+        private Vector2 GetMovementVector()
+        {
+            Vector2 direction = _joyStickObj.Direction;
+            return direction.normalized * speed * Time.fixedDeltaTime;
+        }
+
+        // 애니메이션 처리 (이동 방향에 따른 애니메이션 설정)
+        private void HandleAnimation(Vector2 direction)
+        {
+            bool isMovingRight = direction.x > 0;
+            bool isMovingLeft = direction.x < 0;
+            bool isMovingUp = direction.y > 0;
+            bool isMovingDown = direction.y < 0;
+
+            // 오른쪽 또는 위쪽으로 움직이면 Walk_Right 애니메이션을 재생
+            m_Animator.SetBool(WALK_RIGHT_KEY, isMovingRight || isMovingUp);
+            // 왼쪽 또는 아래쪽으로 움직이면 Walk_Left 애니메이션을 재생
+            m_Animator.SetBool(WALK_LEFT_KEY, isMovingLeft || isMovingDown);
+        }
+
+        // 플레이어 이동 처리
+        private void MovePlayer(Vector2 moveVector)
+        {
+            rgbd2d.MovePosition(rgbd2d.position + moveVector);  // Rigidbody를 통한 물리적 이동
+        }
+
+        // 동물의 타겟 설정
+        private void AssignAnimalTarget()
+        {
+            // 타겟 설정 (일반 타겟 또는 보스 타겟)
+            Transform target = scanner.target != null ? scanner.target.transform : scanner.targetBoss?.transform;
+            if (target == null) return;
+
+            foreach (var animal in _animalArray)
+            {
+                if (animal._animalPrefab == null) continue;
+                var animalComponent = animal._animalPrefab.GetComponent<Animals>();
+
+                // 동물 타겟이 비어있을 때 타겟 설정
+                if (animalComponent._target == null)
+                {
+                    if (scanner.target != null) animalComponent.SetTarget(target);
+                    if (scanner.targetBoss != null) animalComponent.SetTargetBoss(target);
+                }
+            }
+
+            scanner.target = null;
+        }
+
+        // 자동으로 타겟을 추적하는 함수
+        private void AutoFollowTarget()
+        {
+            var target = _animalArray[0]._animalPrefab.GetComponent<Animals>()._target;
+            if (target == null) return;
+
+            float distanceToTarget = Vector3.Distance(transform.position, target.position);
+
+            // 타겟과의 거리에 따라 행동 결정
+            isInRange = distanceToTarget < 0.3f;
+            if (!_isHitting && !isInRange)
+            {
+                Vector2 directionToTarget = (target.position - rgbd2d.transform.position).normalized;
+                MovePlayer(directionToTarget * speed * Time.fixedDeltaTime);  // 타겟을 향해 이동
+            }
+        }
+
+        // 공격 처리
+        private void HandleHitting()
+        {
+            if (!_isHitting) return;
+
+            _hitTimer += Time.fixedDeltaTime;
+            if (_hitTimer >= _hitDelay)
+            {
+                _isHitting = false;  // 공격이 끝났을 때 플래그 초기화
+            }
+        }
+
+        // 데미지를 입었을 때 처리
+        public void TakeDamage(float damage)
+        {
+            currentHp -= Mathf.Floor(damage);  // 체력 감소
+            OnHealthChanged?.Invoke(currentHp);  // 체력 변경 이벤트 호출
+            DamageText(damage);  // 데미지 텍스트 표시
+            _isHitting = true;
+            _hitTimer = 0;
+
+            CameraShake.Instance.ShakeCamera(5f, 0.1f);  // 카메라 흔들림
+
+            if (currentHp <= 0)
+            {
+                Death();  // 체력이 0 이하가 되면 사망 처리
+            }
+            else
+            {
+                Hit();  // 맞는 애니메이션 재생
+            }
+        }
+
+        // 체력 바 업데이트 (이벤트에 의해 호출됨)
+        private void UpdateHealthBar(float health)
+        {
+            hpBar.value = health / maxHP;
+        }
+
+        // 맞았을 때의 애니메이션 및 넉백 처리
+        public void Hit()
+        {
+            m_Animator.SetTrigger(HIT_KEY);
+            KnockBackBarrier();  // 넉백 처리
+        }
+
+        // 사망 처리
+        public void Death()
+        {
+            m_Animator.SetTrigger(DEATH_KEY);
+            GetComponentInChildren<Spawner>().EnemyDestroy();  // 적 스폰 제거
+            InGameScene.Managers.Game._uiManager.StageUI._clearAnimator.SetTrigger("Dead");
+            Managers.Process.GoReStage();  // 스테이지 재시작 처리
+        }
+
+        // 넉백 처리 (주변 적에게 넉백 효과 적용)
+        private void KnockBackBarrier()
+        {
+            GameObject barrierParticle = Instantiate(_particle[2], _particlesParentObject.transform, true);
+            barrierParticle.transform.localPosition = new Vector3(0, 4, 0);
+            barrierParticle.transform.localScale = new Vector3(2, 2, 2);
+
+            // 넉백 범위 내 적 탐색
+            Collider2D[] hitColliders = Physics2D.OverlapCircleAll(transform.position, detectionRadius, enemyLayer);
+            foreach (var hitCollider in hitColliders)
+            {
+                var enemy = hitCollider.GetComponentInParent<Enemy>();
+                if (enemy == null || enemy.health <= 0) continue;
+
+                enemy.TakeKnockBackDamage(5);  // 넉백 데미지 적용
+
+                Rigidbody2D enemyRigidbody = hitCollider.GetComponent<Rigidbody2D>();
+                if (enemyRigidbody == null) continue;
+
+                // 넉백 방향 계산
+
+                Vector3 knockBackDirection = (hitCollider.transform.position - transform.position).normalized;
+                enemyRigidbody.AddForce(knockBackDirection * knockBackForce, ForceMode2D.Impulse);
+            }
+        }
+        // 데미지 텍스트
+        private void DamageText(float damage)
+        {
+            GameObject hudText = ObjectPooler.Instance.SpawnFromPool("DamageText", this.transform.position);
+            hudText.GetComponent<TextMeshPro>().text = UnitTextDamage(damage);
+        }
+
+        // 체력 자동회복
+        private IEnumerator RecoverHealth()
+        {
+            while (true)
+            {
+                float recoverAmount = maxHP * Managers.Player._playerRecoverHP;
+                currentHp = Mathf.Min(currentHp + recoverAmount, maxHP);
+                OnHealthChanged?.Invoke(currentHp);  // Trigger event to update UI
+                yield return new WaitForSeconds(5f);
+            }
+        }
+        // 큰 범위의 텍스트 단위 조
+        public string UnitTextDamage(float damage)
+        {
+            int placeN = 4;
+            System.Numerics.BigInteger valueDmg = (int)damage;
+            List<int> numList = new List<int>();
+            int p = (int)Mathf.Pow(10, placeN);
+
+            do
+            {
+                numList.Add((int)(valueDmg % p));
+                valueDmg /= p;
+            } while (valueDmg >= 1);
+
+            string retStr = "";
+            for (int i = Mathf.Max(0, (numList.Count - 2)); i < numList.Count; i++)
+            {
+                retStr = numList[i] + dmgUnitArr[i] + retStr;
+            }
+
+            return retStr;
+        }
+    }
+}
