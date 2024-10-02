@@ -1,0 +1,182 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+public class MobileCamera : MonoBehaviour
+{
+    // 카메라 관련 변수들
+    public Camera UICamera;
+    public Camera MiniGamesCamera;
+
+    // 터치 시작 위치와 줌 레벨 변수
+    private Vector3 touchStart;
+    public float zoomOutMin = 1f;
+    public float zoomOutMax = 8f;
+
+    // 카메라 이동 범위 제한
+    public float minX = -10f;
+    public float maxX = 10f;
+    public float minY = -10f;
+    public float maxY = 10f;
+
+    // 외부 관리 객체와 상태 변수들
+    public UpButtonManager manager;
+    private bool isZooming = false;
+
+    // 타겟을 따라가는 카메라 관련 변수
+    public Transform target;
+    public float smoothing = 2f; // 카메라 이동 속도
+    public float zoomSpeed = 2f; // 줌인/줌아웃 속도
+    public float idleTime = 0.5f; // 줌인 상태 유지 시간
+    private Vector3 targetPosition;
+    private Vector3 offset; // 카메라와 타겟 사이 거리
+
+    void Update()
+    {
+        // 미니게임 카메라가 활성화되어 있으면 메인 카메라 업데이트 중지
+        if (MiniGamesCamera.gameObject.activeSelf) return;
+
+        HandleInput(); // 입력 처리
+    }
+
+    // 입력 처리 함수
+    private void HandleInput()
+    {
+        // 마우스 클릭 시 터치 시작 위치 저장
+        if (Input.GetMouseButtonDown(0))
+        {
+            touchStart = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+            CloseAllPopups(); // 모든 팝업 닫기
+        }
+
+        // 마우스 버튼을 떼면 줌 동작 종료
+        if (Input.GetMouseButtonUp(0))
+        {
+            isZooming = false;
+        }
+
+        // 터치가 2개일 경우 줌 동작
+        if (Input.touchCount == 2)
+        {
+            PerformPinchZoom(); // 핀치 줌 동작
+        }
+        else if (Input.GetMouseButton(0) && !isZooming && manager.ActiveStateIsIdleOrPhoto() && !GridBuildingSystem.instance.isBuilding)
+        {
+            PanCamera(); // 카메라 이동
+        }
+
+        // 마우스 휠 줌 처리
+        Zoom(Input.GetAxis("Mouse ScrollWheel"));
+    }
+
+    // 모든 팝업 닫기 함수
+    private void CloseAllPopups()
+    {
+        if (!EventSystem.current.IsPointerOverGameObject(GameManager.instance.pointerId))
+        {
+            int childCount = GridBuildingSystem.instance.popupTransform.childCount;
+            for (int i = 0; i < childCount; i++)
+            {
+                GridBuildingSystem.instance.popupTransform.GetChild(i).GetComponent<MiniPopupManager>().ClosePopup();
+            }
+        }
+    }
+
+    // 핀치 줌 처리 함수
+    private void PerformPinchZoom()
+    {
+        Touch touchZero = Input.GetTouch(0);
+        Touch touchOne = Input.GetTouch(1);
+
+        Vector2 touchZeroPrevPos = touchZero.position - touchZero.deltaPosition;
+        Vector2 touchOnePrevPos = touchOne.position - touchOne.deltaPosition;
+
+        float prevMagnitude = (touchZeroPrevPos - touchOnePrevPos).magnitude;
+        float currentMagnitude = (touchZero.position - touchOne.position).magnitude;
+
+        float difference = currentMagnitude - prevMagnitude;
+
+        Zoom(difference * 0.01f);
+        isZooming = true;
+    }
+
+    // 카메라 이동 처리 함수
+    private void PanCamera()
+    {
+        Vector3 direction = touchStart - Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Camera.main.transform.position += direction;
+
+        // 카메라가 지정된 범위를 벗어나지 않도록 제한
+        Camera.main.transform.position = new Vector3(
+            Mathf.Clamp(Camera.main.transform.position.x, minX, maxX),
+            Mathf.Clamp(Camera.main.transform.position.y, minY, maxY),
+            Camera.main.transform.position.z
+        );
+    }
+
+    // 줌 처리 함수
+    private void Zoom(float increment)
+    {
+        Camera.main.orthographicSize = Mathf.Clamp(Camera.main.orthographicSize - increment, zoomOutMin, zoomOutMax);
+        UICamera.orthographicSize = Mathf.Clamp(UICamera.orthographicSize - increment, zoomOutMin, zoomOutMax);
+    }
+
+    // 타겟 설정 함수
+    public void SetTarget(Transform newTarget)
+    {
+        if (target != null)
+        {
+            offset = transform.position - target.position;
+        }
+        target = newTarget;
+        targetPosition = target.position + offset;
+        StartCoroutine(MoveAndZoom());
+    }
+
+    // 카메라 이동 및 줌 처리 코루틴
+    IEnumerator MoveAndZoom()
+    {
+        float elapsedTime = 0f;
+        Vector3 fixedTargetPosition = new Vector3(targetPosition.x, targetPosition.y, -10); // z값을 고정
+        float initialSize = Camera.main.orthographicSize;
+        float targetSize = initialSize / 2; // 줌인 목표 값
+
+        // 카메라 이동 및 줌인 처리
+        while (elapsedTime < smoothing)
+        {
+            transform.position = Vector3.Lerp(transform.position, fixedTargetPosition, elapsedTime / smoothing);
+            Camera.main.orthographicSize = Mathf.Lerp(initialSize, targetSize, elapsedTime / smoothing);
+            elapsedTime += Time.deltaTime;
+            yield return null;
+        }
+
+        // 최종 위치와 줌 크기 설정
+        transform.position = fixedTargetPosition;
+        Camera.main.orthographicSize = targetSize;
+
+        // 잠시 대기 후 줌아웃 시작
+        yield return new WaitForSeconds(idleTime);
+
+        // 줌아웃 처리
+        elapsedTime = 0;
+        while (elapsedTime < zoomSpeed)
+        {
+            Camera.main.orthographicSize = Mathf.Lerp(Camera.main.orthographicSize, initialSize, elapsedTime / zoomSpeed);
+            elapsedTime += Time.deltaTime;
+            yield return null;
+        }
+
+        // 최종 줌 크기 설정
+        Camera.main.orthographicSize = initialSize;
+    }
+}
+
+// UpButtonManager에서 상태 확인 메서드 추가 (추가 필요)
+public static class UpButtonManagerExtensions
+{
+    public static bool ActiveStateIsIdleOrPhoto(this UpButtonManager manager)
+    {
+        return manager.ActiveState == STATES.IDLE || manager.ActiveState == STATES.PHOTO;
+    }
+}
