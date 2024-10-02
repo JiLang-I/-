@@ -1,0 +1,294 @@
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.Tilemaps;
+
+public class GridBuildingSystem : MonoBehaviour
+{
+    // 싱글톤 인스턴스 정의
+    public static GridBuildingSystem Instance { get; private set; }
+
+    // Grid와 Tilemap 관련 변수
+    public GridLayout gridLayout;
+    public Tilemap mainTilemap;
+    public Tilemap tempTilemap;
+    public Tilemap tileTilemap;
+
+    // 타일 종류에 따른 TileBase를 저장할 딕셔너리
+    public static readonly Dictionary<TileType, TileBase> tileBases = new Dictionary<TileType, TileBase>();
+    public Dictionary<Vector3Int, TileBase> previousTiles = new Dictionary<Vector3Int, TileBase>();
+
+    // 현재 건설 중인 건물과 관련된 변수들
+    public Building currentBuilding;
+    private BoundsInt prevArea;
+
+    public bool isBuilding;
+    public bool isTileDrawing;
+    public IsometricRuleTile drawingTile; // 타일 그리기 시 사용할 타일
+    public TileBase selectedTile; // 선택된 일반 타일
+
+    // 팝업 관련 변수들
+    public GameObject popupPrefab;
+    public GameObject disposePopupPrefab;
+    public Transform buildingsParent;
+    public Transform popupParent;
+
+    // 타일 그리기 시작 및 끝 좌표
+    private Vector3Int startCellPosition;
+    private Vector3Int endCellPosition;
+
+    private void Awake()
+    {
+        // 싱글톤 인스턴스 초기화 (이미 존재하면 파괴)
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
+
+        // 타일 베이스 초기화
+        InitializeTileBases();
+    }
+
+    // 타일 베이스 초기화 메서드
+    private void InitializeTileBases()
+    {
+        string tilePath = @"Tiles\";
+        tileBases.Add(TileType.Empty, null);
+        tileBases.Add(TileType.White, Resources.Load<TileBase>(tilePath + "white"));
+        tileBases.Add(TileType.Green, Resources.Load<TileBase>(tilePath + "green"));
+        tileBases.Add(TileType.Red, Resources.Load<TileBase>(tilePath + "red"));
+        tileBases.Add(TileType.NonEmpty, Resources.Load<TileBase>(tilePath + "nonEmpty"));
+    }
+
+    private void Update()
+    {
+        // 타일을 그리고 있을 때 마우스 클릭을 처리
+        if (isTileDrawing && Input.GetMouseButtonDown(0))
+        {
+            HandleTileDrawing();
+        }
+
+        // 현재 건설 중인 건물이 없으면 반환
+        if (currentBuilding == null) return;
+    }
+
+    // 타일 그리기 처리
+    private void HandleTileDrawing()
+    {
+        Vector3 mouseWorldPosition = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        Vector3Int cellPosition = tileTilemap.WorldToCell(new Vector3(mouseWorldPosition.x, mouseWorldPosition.y, 0));
+        TileBase clickedTile = tileTilemap.GetTile(cellPosition);
+
+        // 클릭한 타일이 현재 그리기 타일과 같으면 일반 타일로 변경
+        if (clickedTile == drawingTile)
+        {
+            tileTilemap.SetTile(cellPosition, selectedTile);
+            TilePanel.Instance.RemoveTile();
+        }
+        else
+        {
+            // 이전 타일 상태 저장
+            SavePreviousTiles();
+            if (!EventSystem.current.IsPointerOverGameObject(GameManager.Instance.pointerId))
+            {
+                selectedTile = clickedTile;
+                tileTilemap.SetTile(cellPosition, drawingTile);
+                TilePanel.Instance.AddTile();
+            }
+        }
+    }
+
+    // 이전 타일 상태 저장
+    private void SavePreviousTiles()
+    {
+        foreach (Vector3Int position in tileTilemap.cellBounds.allPositionsWithin)
+        {
+            TileBase currentTile = tileTilemap.GetTile(position);
+            if (currentTile != drawingTile)
+            {
+                previousTiles[position] = currentTile;
+            }
+        }
+    }
+
+    // 마우스 위치에 타일 배치
+    public void PlaceTileAtMousePosition(RuleTile ruleTile, Vector3 mousePosition)
+    {
+        Vector3Int cellPosition = mainTilemap.WorldToCell(mousePosition);
+        mainTilemap.SetTile(cellPosition, ruleTile);
+    }
+
+    // 건물 배치
+    public void SetBuilding(Building building)
+    {
+        if (building.CanBePlaced())
+        {
+            building.Place();
+            InventoryUIManager.Instance.UpdateBuildingCondition(building.item);
+            building.Initialize();
+        }
+        building.ClosePopup();
+    }
+
+    // 기존 건물 재설치
+    public void Rebuild(Building building)
+    {
+        currentBuilding = building;
+        currentBuilding.Replace();
+        InventoryUIManager.Instance.UpdateBuildingCondition(currentBuilding.item);
+        currentBuilding.Initialize();
+        HighlightBuildingArea();
+        currentBuilding.ClosePopup();
+    }
+
+    // 타일 그리기 취소
+    public void CancelTileDrawing()
+    {
+        foreach (var kvp in previousTiles)
+        {
+            tileTilemap.SetTile(kvp.Key, kvp.Value);
+        }
+    }
+
+    // 건물 배치 취소
+    public void CancelBuilding()
+    {
+        ClearArea(prevArea);
+        Destroy(currentBuilding.gameObject);
+        InventoryUIManager.Instance.Reset();
+        currentBuilding.ClosePopup();
+    }
+
+    // 특정 영역의 타일 가져오기
+    private static TileBase[] GetTilesInArea(BoundsInt area, Tilemap tilemap)
+    {
+        var tileArray = new TileBase[area.size.x * area.size.y * area.size.z];
+        int index = 0;
+
+        foreach (var position in area.allPositionsWithin)
+        {
+            tileArray[index++] = tilemap.GetTile(new Vector3Int(position.x, position.y, 0));
+        }
+
+        return tileArray;
+    }
+
+    // 특정 영역에 타일 설정
+    private static void SetTilesInArea(BoundsInt area, TileType type, Tilemap tilemap)
+    {
+        var tileArray = CreateTileArray(area, type);
+        tilemap.SetTilesBlock(area, tileArray);
+    }
+
+    // 영역에 맞는 타일 배열 생성
+    private static TileBase[] CreateTileArray(BoundsInt area, TileType type)
+    {
+        TileBase[] tileArray = new TileBase[area.size.x * area.size.y * area.size.z];
+        FillTiles(tileArray, type);
+        return tileArray;
+    }
+
+    // 배열을 특정 타일 타입으로 채우기
+    private static void FillTiles(TileBase[] arr, TileType type)
+    {
+        TileBase tile = tileBases[type];
+        for (int i = 0; i < arr.Length; i++)
+        {
+            arr[i] = tile;
+        }
+    }
+
+    // 건물 초기화
+    public void InitializeWithBuilding(GameObject buildingPrefab, Item item)
+    {
+        Vector3 position = gridLayout.CellToLocalInterpolated(new Vector3(.5f, .5f, 0f));
+        currentBuilding = Instantiate(buildingPrefab, position, Quaternion.identity).GetComponent<Building>();
+        currentBuilding.transform.parent = buildingsParent;
+        currentBuilding.item = item;
+        HighlightBuildingArea();
+    }
+
+    // 특정 영역의 타일 비우기
+    public void ClearArea(BoundsInt area)
+    {
+        SetTilesInArea(area, TileType.Empty, tempTilemap);
+    }
+
+    // 건물 아래 영역 강조 표시
+    public void HighlightBuildingArea()
+    {
+        ClearArea(prevArea);
+
+        currentBuilding.area.position = gridLayout.WorldToCell(currentBuilding.transform.position);
+        BoundsInt buildingArea = currentBuilding.area;
+
+        TileBase[] mainTileArray = GetTilesInArea(buildingArea, mainTilemap);
+        TileBase[] highlightTiles = CreateHighlightTileArray(mainTileArray);
+
+        tempTilemap.SetTilesBlock(buildingArea, highlightTiles);
+        prevArea = buildingArea;
+    }
+
+    // 강조할 타일 배열 생성
+    private TileBase[] CreateHighlightTileArray(TileBase[] baseArray)
+    {
+        TileBase[] tileArray = new TileBase[baseArray.Length];
+        for (int i = 0; i < baseArray.Length; i++)
+        {
+            tileArray[i] = baseArray[i] == tileBases[TileType.White] ? tileBases[TileType.Green] : tileBases[TileType.Red];
+        }
+        return tileArray;
+    }
+
+    // 건물 배치 가능 여부 확인
+    public bool CanPlaceBuilding(BoundsInt area)
+    {
+        TileBase[] baseArray = GetTilesInArea(area, mainTilemap);
+        foreach (var tile in baseArray)
+        {
+            if (tile != tileBases[TileType.White])
+            {
+                Debug.Log("Cannot place here");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // 영역을 건물로 예약
+    public void ReserveBuildingArea(BoundsInt area)
+    {
+        SetTilesInArea(area, TileType.NonEmpty, mainTilemap);
+    }
+
+    // 영역의 타일을 초기화
+    public void ReleaseBuildingArea(BoundsInt area)
+    {
+        SetTilesInArea(area, TileType.White, mainTilemap);
+    }
+
+    // 타일 그리기 시작
+    public void StartTileDrawing(IsometricRuleTile tile)
+    {
+        isTileDrawing = true;
+        drawingTile = tile;
+    }
+
+    // 타일 그리기 종료
+    public void StopTileDrawing()
+    {
+        isTileDrawing = false;
+    }
+}
+
+// 타일 타입 열거형
+public enum TileType
+{
+    Empty,     // 빈 타일
+    White,     // 배치 가능한 타일
+    Green,     // 배치 가능 표시
+    Red,       // 배치 불가 표시
+    NonEmpty   // 채워진 타일
+}
