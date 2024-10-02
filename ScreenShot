@@ -1,0 +1,161 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using System.IO;
+using UnityEngine.UI;
+
+public class ScreenShot : MonoBehaviour
+{
+    public static ScreenShot instance;
+
+    public Camera shotCamera; // 캡처할 카메라
+    public GameObject CameraPanel;
+    public GameObject UiPanel;
+    public Image flashImg;
+    public GameObject[] CameraArrow;
+
+    private int resWidth;
+    private int resHeight;
+    private string path;
+    private Coroutine _currentFlashRoutine = null;
+    [SerializeField] private Color _newColor = Color.white;
+    private float time;
+
+    private void Awake()
+    {
+        instance = this;
+    }
+
+    void Start()
+    {
+        // 해상도 및 경로 설정
+        resWidth = Screen.width;
+        resHeight = Screen.height;
+        path = Application.dataPath + "/ScreenShot/";
+    }
+
+    void Update()
+    {
+        // 카메라 패널이 비활성화되어 있으면 로직 수행하지 않음
+        if (!CameraPanel.activeSelf) return;
+
+        // 화살표 애니메이션 처리
+        UpdateCameraArrows();
+    }
+
+    // 화살표 색상 애니메이션 함수
+    private void UpdateCameraArrows()
+    {
+        for (int i = 0; i < CameraArrow.Length; i++)
+        {
+            Color arrowColor = CameraArrow[i].GetComponent<Image>().color;
+            arrowColor.a = time < 0.6f ? 1 - time : time;
+            CameraArrow[i].GetComponent<Image>().color = arrowColor;
+        }
+        
+        time += Time.deltaTime;
+        if (time > 1f) time = 0f;
+    }
+
+    // 패널 열기
+    public void OpenPanel()
+    {
+        CameraPanel.SetActive(true);
+        UiPanel.SetActive(false);
+    }
+
+    // 패널 닫기
+    public void ClosePanel()
+    {
+        CameraPanel.SetActive(false);
+        UiPanel.SetActive(true);
+    }
+
+    // 스크린샷 촬영 버튼 클릭 시 호출
+    public void ClickScreenShot()
+    {
+        StartFlash(0.25f, 0.5f, _newColor); // 플래시 효과 시작
+
+        // 스크린샷 저장 경로가 없으면 생성
+        if (!Directory.Exists(path))
+        {
+            Directory.CreateDirectory(path);
+        }
+
+        StartCoroutine(TakeScreenshot()); // 스크린샷 촬영 코루틴 시작
+    }
+
+    // 스크린샷을 촬영하는 코루틴
+    private IEnumerator TakeScreenshot()
+    {
+        // 렌더 텍스처 생성
+        RenderTexture rt = new RenderTexture(resWidth, resHeight, 24);
+        shotCamera.targetTexture = rt;
+
+        // 화면 캡처를 위해 렌더링 대기
+        yield return new WaitForEndOfFrame();
+
+        // 스크린샷 텍스처 생성
+        Texture2D screenShot = new Texture2D(resWidth, resHeight, TextureFormat.RGB24, false);
+        Rect captureArea = new Rect(0, 0, resWidth, resHeight);
+        shotCamera.Render();
+        RenderTexture.active = rt;
+        screenShot.ReadPixels(captureArea, 0, 0);
+        screenShot.Apply();
+
+        // 렌더 텍스처 해제 및 메모리 해제
+        shotCamera.targetTexture = null;
+        RenderTexture.active = null;
+        Destroy(rt);
+
+        // 스크린샷 파일 저장
+        string fileName = path + System.DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss") + ".png";
+        File.WriteAllBytes(fileName, screenShot.EncodeToPNG());
+
+        Debug.Log("Screenshot saved at: " + fileName);
+    }
+
+    // 플래시 효과 시작
+    public void StartFlash(float flashDuration, float maxAlpha, Color newColor)
+    {
+        flashImg.color = newColor;
+        maxAlpha = Mathf.Clamp(maxAlpha, 0, 1); // 알파값 제한
+
+        if (_currentFlashRoutine != null)
+        {
+            StopCoroutine(_currentFlashRoutine); // 기존 코루틴이 있으면 중지
+        }
+
+        // 새로운 플래시 코루틴 시작
+        _currentFlashRoutine = StartCoroutine(Flash(flashDuration, maxAlpha));
+    }
+
+    // 플래시 애니메이션 코루틴
+    private IEnumerator Flash(float flashDuration, float maxAlpha)
+    {
+        flashImg.gameObject.SetActive(true);
+
+        // 플래시 인 효과
+        float halfDuration = flashDuration / 2;
+        for (float t = 0; t <= halfDuration; t += Time.deltaTime)
+        {
+            Color colorThisFrame = flashImg.color;
+            colorThisFrame.a = Mathf.Lerp(0, maxAlpha, t / halfDuration);
+            flashImg.color = colorThisFrame;
+            yield return null;
+        }
+
+        // 플래시 아웃 효과
+        for (float t = 0; t <= halfDuration; t += Time.deltaTime)
+        {
+            Color colorThisFrame = flashImg.color;
+            colorThisFrame.a = Mathf.Lerp(maxAlpha, 0, t / halfDuration);
+            flashImg.color = colorThisFrame;
+            yield return null;
+        }
+
+        // 플래시 종료
+        flashImg.color = new Color32(0, 0, 0, 0);
+        flashImg.gameObject.SetActive(false);
+    }
+}
